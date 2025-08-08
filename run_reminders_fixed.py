@@ -45,7 +45,7 @@ def get_next_person_and_update_state(db_session):
     if not residents:
         return None
 
-    state = db.session.query(AppState).first()
+    state = db_session.query(AppState).first()
     if not state:
         state = AppState(last_person_index=-1)
         db_session.add(state)
@@ -76,7 +76,7 @@ def send_whatsapp_message(message):
     except requests.exceptions.RequestException as e:
         print(f"Failed to send message: {e}")
         if 'response' in locals() and response:
-            print(f"Response content: {response.text}")
+            print(f"Response content: {response.text.encode('utf8')}")
 
 # --- Main reminder logic for cron job ---
 def main(reminder_type):
