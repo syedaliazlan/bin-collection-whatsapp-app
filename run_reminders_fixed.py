@@ -43,6 +43,7 @@ def get_current_bin_type(date):
 def get_next_person_and_update_state(db_session):
     residents = db_session.query(Resident).order_by(Resident.id).all()
     if not residents:
+        print("Error: No residents found in the database. Cannot assign duty.")
         return None
 
     state = db_session.query(AppState).first()
@@ -80,28 +81,51 @@ def send_whatsapp_message(message):
 
 # --- Main reminder logic for cron job ---
 def main(reminder_type):
-    with app.app_context():
-        if reminder_type == 'take-out':
-            person = get_next_person_and_update_state(db.session)
-            bin_type = get_current_bin_type(datetime.now())
-            if person and bin_type:
-                message = (f"Hello {person.name}! It's your turn to take out the bins. "
-                           f"Tomorrow is {bin_type['type']} collection day. "
-                           f"Please put the {bin_type['color']} bins out tonight. Thanks!")
-                print(f"Sending 'take-out' reminder: {message}")
-                send_whatsapp_message(message)
-        
-        elif reminder_type == 'bring-in':
-            state = db.session.query(AppState).first()
-            if not state: return
+    try:
+        with app.app_context():
+            print("Starting cron job main function...")
+            
+            # Check if there are any residents before proceeding
             residents = db.session.query(Resident).order_by(Resident.id).all()
-            if not residents: return
-            person = residents[state.last_person_index]
-            bin_type = get_current_bin_type(datetime.now())
-            message = (f"Hey {person.name}, hope your day is going well! "
-                       f"Just a friendly reminder to please bring in the {bin_type['color']} bins tonight. Thank you!")
-            print(f"Sending 'bring-in' reminder: {message}")
-            send_whatsapp_message(message)
+            if not residents:
+                print("No residents found. Exiting cron job.")
+                return
+
+            if reminder_type == 'take-out':
+                person = get_next_person_and_update_state(db.session)
+                bin_type = get_current_bin_type(datetime.now())
+                if person and bin_type:
+                    message = (f"Hello {person.name}! It's your turn to take out the bins. "
+                               f"Tomorrow is {bin_type['type']} collection day. "
+                               f"Please put the {bin_type['color']} bins out tonight. Thanks!")
+                    print(f"Sending 'take-out' reminder: {message}")
+                    send_whatsapp_message(message)
+            
+            elif reminder_type == 'bring-in':
+                state = db.session.query(AppState).first()
+                if not state:
+                    print("App state not initialized. Exiting cron job.")
+                    return
+                
+                # We need to get residents again here in case the first call failed
+                residents = db.session.query(Resident).order_by(Resident.id).all()
+                if not residents:
+                    print("No residents found. Exiting cron job.")
+                    return
+                
+                person = residents[state.last_person_index]
+                bin_type = get_current_bin_type(datetime.now())
+                message = (f"Hey {person.name}, hope your day is going well! "
+                           f"Just a friendly reminder to please bring in the {bin_type['color']} bins tonight. Thank you!")
+                print(f"Sending 'bring-in' reminder: {message}")
+                send_whatsapp_message(message)
+    
+    except Exception as e:
+        print(f"An unexpected error occurred during cron job execution: {e}", file=sys.stderr)
+        # Re-raise the exception to ensure it's logged by Render's system
+        raise
+
+    print("Cron job finished.")
 
 if __name__ == '__main__':
     if len(sys.argv) > 1:
