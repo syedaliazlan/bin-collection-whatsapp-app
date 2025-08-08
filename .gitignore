@@ -68,6 +68,3 @@ coverage.xml
 
 # macOS
 .DS_Store
-
-# Windows
-Thumbs.db
