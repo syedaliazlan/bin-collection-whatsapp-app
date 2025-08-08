@@ -3,8 +3,6 @@ import requests
 from datetime import datetime, timedelta
 from flask import Flask, render_template_string, request, redirect, url_for, flash
 from flask_sqlalchemy import SQLAlchemy
-from apscheduler.schedulers.background import BackgroundScheduler
-import atexit
 from pytz import timezone
 from dotenv import load_dotenv
 
@@ -76,6 +74,11 @@ SETUP_TEMPLATE = """
                 </div>
             {% endif %}
         {% endwith %}
+
+        <div class="mb-8 p-4 bg-gray-50 rounded-md">
+            <h2 class="text-xl font-semibold mb-2 text-gray-700">Bin Schedule</h2>
+            <p class="text-gray-600">The schedule is fixed: General waste on even weeks, Recycling on odd weeks. Both are collected on Fridays.</p>
+        </div>
 
         <div class="mb-8">
             <h2 class="text-xl font-semibold mb-2 text-gray-700">Add a New Resident</h2>
@@ -198,237 +201,77 @@ TEST_TEMPLATE = """
 </body>
 </html>
 """
-
 # --- Configuration & Setup ---
-
-# Initialize Flask app
 app = Flask(__name__)
-# Use a secret key for flashing messages
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key-for-development')
-
-# Database configuration
-# The database URL is provided by Render, or a local one is used for development
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'postgresql://user:password@localhost/bin_app_db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
-# Initialize the database
 db = SQLAlchemy(app)
 
-# GreenAPI credentials from environment variables
 GREENAPI_INSTANCE_ID = os.getenv('GREENAPI_INSTANCE_ID')
 GREENAPI_API_TOKEN = os.getenv('GREENAPI_API_TOKEN')
 WHATSAPP_GROUP_CHAT_ID = os.getenv('WHATSAPP_GROUP_CHAT_ID')
 
-# --- Database Model ---
+# --- Database Models ---
 class Resident(db.Model):
-    """
-    A model to store the names of residents.
-    """
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(80), unique=True, nullable=False)
 
 class AppState(db.Model):
-    """
-    A model to store the state of the application, such as the index of the
-    person responsible for the bin collection. This is crucial for persistence
-    between app restarts and to maintain the rotation cycle.
-    """
     id = db.Column(db.Integer, primary_key=True)
-    last_person_index = db.Column(db.Integer, default=0)
+    last_person_index = db.Column(db.Integer, default=-1)
 
-# --- WhatsApp Integration ---
-def send_whatsapp_message(message):
-    """
-    Sends a message to the specified WhatsApp group using the GreenAPI.
-    
-    Args:
-        message (str): The message text to send.
-    """
-    url = f"https://7105.api.greenapi.com/waInstance{GREENAPI_INSTANCE_ID}/sendMessage/{GREENAPI_API_TOKEN}"
-    payload = {
-        "chatId": WHATSAPP_GROUP_CHAT_ID,
-        "message": message,
-        "linkPreview": False
-    }
-    headers = {
-        'Content-Type': 'application/json'
-    }
-
-    try:
-        response = requests.post(url, json=payload, headers=headers)
-        response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
-        print(f"Message sent successfully. Response: {response.text.encode('utf8')}")
-    except requests.exceptions.RequestException as e:
-        print(f"Failed to send message: {e}")
-        # Note: 'response' might not be defined if the request failed before a response was received
-        if 'response' in locals() and response:
-            print(f"Response content: {response.text}")
-
-
-# --- Bin Collection Logic ---
-
-# Bin collection schedule based on the provided HTML file.
-# Collections are always on a Friday and alternate between the two types.
+# --- Bin Collection Logic (hardcoded) ---
 BIN_SCHEDULE = [
     {"type": "General waste", "color": "grey"},
     {"type": "Paper/card and Glass/cans/plastics", "color": "red and yellow"}
 ]
+COLLECTION_DAY = 4 # Friday
 
 def get_current_bin_type(date):
-    """
-    Determines the bin type for a given date based on the week number.
-    This provides a reliable two-week alternating schedule.
-    """
     week_number = date.isocalendar()[1]
-    # Check if the week number is even or odd to determine the bin type
     return BIN_SCHEDULE[week_number % 2]
 
-
 def get_next_person_and_update_state(db_session):
-    """
-    Selects the next person in the rotation and updates the database.
-    It expects an active database session to be passed to it.
-    """
     residents = db_session.query(Resident).order_by(Resident.id).all()
     if not residents:
-        print("No residents found. Cannot assign bin duty.")
         return None
 
     state = db_session.query(AppState).first()
     if not state:
         state = AppState(last_person_index=-1)
         db_session.add(state)
+        db_session.commit()
 
     next_index = (state.last_person_index + 1) % len(residents)
     person = residents[next_index]
-
     state.last_person_index = next_index
     db.session.commit()
-
     return person
 
-
 def get_person_for_test(db_session, offset):
-    """
-    Returns the person responsible for the bin collection a given number of
-    weeks (offset) in the future. This function does NOT update the database.
-    
-    Args:
-        db_session: The active SQLAlchemy session.
-        offset (int): The number of weeks to look ahead (0 for current week, 1 for next week, etc.).
-    """
     residents = db_session.query(Resident).order_by(Resident.id).all()
     if not residents:
         return None, None
-
     state = db_session.query(AppState).first()
-    if not state:
-        # If no state, start from the first person for the first week (offset 0)
-        # and cycle from there for subsequent weeks
-        person_index = offset % len(residents)
-    else:
-        # Calculate the index for the test without changing the saved state
-        # The rotation starts from the last assigned person + 1
-        person_index = (state.last_person_index + offset + 1) % len(residents)
-    
+    last_person_index = state.last_person_index if state else -1
+    person_index = (last_person_index + offset + 1) % len(residents)
     person = residents[person_index]
-    
     test_date = datetime.now(timezone('Europe/London')) + timedelta(weeks=offset)
     bin_type_info = get_current_bin_type(test_date)
-    
     return person, bin_type_info
-
-
-# --- Scheduled Jobs ---
-def send_reminders(day_of_week=None):
-    """
-    This function will be scheduled to run every Thursday and Friday.
-    It checks the day of the week and sends the appropriate reminder.
-    
-    Args:
-        day_of_week (int, optional): An optional integer representing the day of the week
-                                     (0=Monday, 3=Thursday, 4=Friday). If not provided,
-                                     the current day is used.
-    """
-    with app.app_context():
-        if day_of_week is None:
-            today = datetime.now(timezone('Europe/London')).weekday()
-        else:
-            today = day_of_week
-
-        print(f"Running reminder check for day {today} at {datetime.now(timezone('Europe/London'))}")
-        
-        # Thursday (weekday() returns 3 for Thursday)
-        if today == 3:
-            # Assign duty and get bin type
-            person = get_next_person_and_update_state(db.session)
-            bin_type = get_current_bin_type(datetime.now())
-            if person and bin_type:
-                message = (
-                    f"Hello {person.name}! It's your turn to take out the bins. "
-                    f"Tomorrow is {bin_type['type']} collection day. "
-                    f"Please put the {bin_type['color']} bins out tonight. Thanks!"
-                )
-                print(f"Sending Thursday reminder: {message}")
-                send_whatsapp_message(message)
-        
-        # Friday (weekday() returns 4 for Friday)
-        elif today == 4:
-            # Get the person who was assigned yesterday (or the last person in the cycle)
-            state = db.session.query(AppState).first()
-            if not state:
-                print("App state not initialized. Cannot send Friday reminder.")
-                return
-            
-            residents = db.session.query(Resident).order_by(Resident.id).all()
-            if not residents:
-                print("No residents found. Cannot send Friday reminder.")
-                return
-            
-            person = residents[state.last_person_index]
-            bin_type = get_current_bin_type(datetime.now())
-
-            message = (
-                f"Hey {person.name}, hope your day is going well! "
-                f"Just a friendly reminder to please bring in the {bin_type['color']} bins tonight. Thank you!"
-            )
-            print(f"Sending Friday reminder: {message}")
-            send_whatsapp_message(message)
-
-# --- Scheduler setup ---
-scheduler = BackgroundScheduler()
-
-# Add job for Thursday reminder at a specific time (e.g., 6 PM London time)
-scheduler.add_job(
-    func=send_reminders,
-    trigger="cron",
-    day_of_week='thu',
-    hour=18,
-    minute=0,
-    timezone='Europe/London'
-)
-
-# Add job for Friday reminder at a specific time (e.g., 7 PM London time)
-scheduler.add_job(
-    func=send_reminders,
-    trigger="cron",
-    day_of_week='fri',
-    hour=19,
-    minute=0,
-    timezone='Europe/London'
-)
-
 
 # --- Flask Routes ---
 @app.route('/')
 def home():
-    residents = db.session.query(Resident).order_by(Resident.id).all()
-    return render_template_string(HOME_TEMPLATE, residents=residents)
+    with app.app_context():
+        residents = db.session.query(Resident).order_by(Resident.id).all()
+        return render_template_string(HOME_TEMPLATE, residents=residents)
 
 @app.route('/setup', methods=['GET', 'POST'])
 def setup():
-    if request.method == 'POST':
-        with app.app_context():
+    with app.app_context():
+        if request.method == 'POST':
             if 'add_resident' in request.form:
                 name = request.form.get('name')
                 if name:
@@ -443,7 +286,6 @@ def setup():
                 resident_to_delete = db.session.query(Resident).get(resident_id)
                 if resident_to_delete:
                     db.session.delete(resident_to_delete)
-                    # Reset the rotation index to avoid issues with missing users
                     state = db.session.query(AppState).first()
                     if state:
                         state.last_person_index = -1
@@ -457,10 +299,8 @@ def setup():
                 db.session.commit()
                 flash("All residents and app state cleared.")
 
-        return redirect(url_for('setup'))
-
-    residents = db.session.query(Resident).order_by(Resident.id).all()
-    return render_template_string(SETUP_TEMPLATE, residents=residents)
+        residents = db.session.query(Resident).order_by(Resident.id).all()
+        return render_template_string(SETUP_TEMPLATE, residents=residents)
 
 @app.route('/schedule')
 def schedule():
@@ -469,84 +309,52 @@ def schedule():
         schedule_data = []
 
         if residents:
-            # Get the number of weeks to display from the URL parameter, default to 4
             num_weeks = request.args.get('weeks', 4, type=int)
-            
-            # Get the last assigned person index
             last_person_index = -1
             state = db.session.query(AppState).first()
             if state:
                 last_person_index = state.last_person_index
-
-            # Generate the schedule for the specified number of weeks
             start_date = datetime.now(timezone('Europe/London'))
             for i in range(num_weeks):
                 next_collection_day = start_date + timedelta(weeks=i)
-                # Find the next Friday (weekday 4)
-                days_until_friday = (4 - next_collection_day.weekday() + 7) % 7
+                days_until_friday = (COLLECTION_DAY - next_collection_day.weekday() + 7) % 7
                 next_collection_day += timedelta(days=days_until_friday)
                 
                 bin_type_info = get_current_bin_type(next_collection_day)
                 person_index = (last_person_index + 1 + i) % len(residents)
                 person = residents[person_index]
 
-                schedule_data.append({
-                    "date": next_collection_day,
-                    "bin_type": bin_type_info['type'],
-                    "person": person.name
-                })
+                schedule_data.append({"date": next_collection_day,
+                                      "bin_type": bin_type_info['type'],
+                                      "person": person.name})
     
-    return render_template_string(SCHEDULE_TEMPLATE, schedule=schedule_data)
-
+    return render_template_string(SCHEDULE_TEMPLATE, schedule=schedule_data, num_weeks=request.args.get('weeks', 4, type=int))
 
 @app.route('/test-reminders')
 def test_reminders():
-    """
-    A test endpoint to manually trigger the reminder logic for a specific day and offset.
-    The offset parameter allows you to test future weeks without changing the database state.
-    
-    Example usage:
-    - /test-reminders?day=thursday&offset=0 (Simulates this week's Thursday reminder)
-    - /test-reminders?day=thursday&offset=1 (Simulates next week's Thursday reminder)
-    """
     with app.app_context():
         day_param = request.args.get('day', '').lower()
         offset_param = request.args.get('offset', 0, type=int)
         day_map = {'thursday': 3, 'friday': 4}
-        
-        if day_param not in day_map:
+        if day_param not in day_map.values():
             return "Invalid day specified. Please use 'thursday' or 'friday'."
-        
         person, bin_type = get_person_for_test(db.session, offset_param)
-        
         if person and bin_type:
             if day_param == 'thursday':
-                message = (
-                    f"Hello {person.name}! It's your turn to take out the bins. "
-                    f"Tomorrow is {bin_type['type']} collection day. "
-                    f"Please put the {bin_type['color']} bins out tonight. Thanks!"
-                )
+                message = (f"Hello {person.name}! It's your turn to take out the bins. "
+                           f"Tomorrow is {bin_type['type']} collection day. "
+                           f"Please put the {bin_type['color']} bins out tonight. Thanks!")
             elif day_param == 'friday':
-                message = (
-                    f"Hey {person.name}, hope your day is going well! "
-                    f"Just a friendly reminder to please bring in the {bin_type['color']} bins tonight. Thank you!"
-                )
-            
+                message = (f"Hey {person.name}, hope your day is going well! "
+                           f"Just a friendly reminder to please bring in the {bin_type['color']} bins tonight. Thank you!")
             print(f"Simulated test reminder: {message}")
             return render_template_string(TEST_TEMPLATE, message=message)
         else:
             return "Cannot send test reminders. Please make sure you have added residents on the setup page."
 
-
 # --- Initial app setup and start scheduler ---
 if __name__ == '__main__':
     with app.app_context():
-        # Create the database and tables if they don't exist
         db.create_all()
-        # Start the scheduler when the app is first run
-        scheduler.start()
 
-    # Shut down the scheduler when the app exits
-    atexit.register(lambda: scheduler.shutdown())
-    
     app.run(host='0.0.0.0', port=5000, debug=True)
