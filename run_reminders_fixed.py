@@ -1,4 +1,5 @@
 import os
+import sys
 import requests
 from datetime import datetime, timedelta
 from flask import Flask
@@ -34,7 +35,6 @@ BIN_SCHEDULE = [
     {"type": "General waste", "color": "grey"},
     {"type": "Paper/card and Glass/cans/plastics", "color": "red and yellow"}
 ]
-COLLECTION_DAY = 4 # Friday
 
 def get_current_bin_type(date):
     week_number = date.isocalendar()[1]
@@ -45,7 +45,7 @@ def get_next_person_and_update_state(db_session):
     if not residents:
         return None
 
-    state = db_session.query(AppState).first()
+    state = db.session.query(AppState).first()
     if not state:
         state = AppState(last_person_index=-1)
         db_session.add(state)
@@ -79,23 +79,19 @@ def send_whatsapp_message(message):
             print(f"Response content: {response.text}")
 
 # --- Main reminder logic for cron job ---
-def main():
+def main(reminder_type):
     with app.app_context():
-        today = datetime.now(timezone('Europe/London')).weekday()
-        
-        # Thursday (weekday() returns 3) is the day before collection
-        if today == 3:
+        if reminder_type == 'take-out':
             person = get_next_person_and_update_state(db.session)
             bin_type = get_current_bin_type(datetime.now())
             if person and bin_type:
                 message = (f"Hello {person.name}! It's your turn to take out the bins. "
                            f"Tomorrow is {bin_type['type']} collection day. "
                            f"Please put the {bin_type['color']} bins out tonight. Thanks!")
-                print(f"Sending Thursday reminder: {message}")
+                print(f"Sending 'take-out' reminder: {message}")
                 send_whatsapp_message(message)
         
-        # Friday (weekday() returns 4) is the day of collection
-        elif today == 4:
+        elif reminder_type == 'bring-in':
             state = db.session.query(AppState).first()
             if not state: return
             residents = db.session.query(Resident).order_by(Resident.id).all()
@@ -104,8 +100,11 @@ def main():
             bin_type = get_current_bin_type(datetime.now())
             message = (f"Hey {person.name}, hope your day is going well! "
                        f"Just a friendly reminder to please bring in the {bin_type['color']} bins tonight. Thank you!")
-            print(f"Sending Friday reminder: {message}")
+            print(f"Sending 'bring-in' reminder: {message}")
             send_whatsapp_message(message)
 
 if __name__ == '__main__':
-    main()
+    if len(sys.argv) > 1:
+        main(sys.argv[1])
+    else:
+        print("Error: A reminder type ('take-out' or 'bring-in') must be specified as a command-line argument.")
