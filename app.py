@@ -330,27 +330,40 @@ def schedule():
     
     return render_template_string(SCHEDULE_TEMPLATE, schedule=schedule_data, num_weeks=request.args.get('weeks', 4, type=int))
 
+# Test Route to Check Upcoming Reminder Message
+
 @app.route('/test-reminders')
 def test_reminders():
     with app.app_context():
         day_param = request.args.get('day', '').lower()
         offset_param = request.args.get('offset', 0, type=int)
-        day_map = {'thursday': 3, 'friday': 4}
-        if day_param not in day_map.values():
+
+        # validate day input
+        if day_param not in ('thursday', 'friday'):
             return "Invalid day specified. Please use 'thursday' or 'friday'."
+
+        # get next resident + bin type for the offset week
         person, bin_type = get_person_for_test(db.session, offset_param)
-        if person and bin_type:
-            if day_param == 'thursday':
-                message = (f"Hello {person.name}! It's your turn to take out the bins. "
-                           f"Tomorrow is {bin_type['type']} collection day. "
-                           f"Please put the {bin_type['color']} bins out tonight. Thanks!")
-            elif day_param == 'friday':
-                message = (f"Hey {person.name}, hope your day is going well! "
-                           f"Just a friendly reminder to please bring in the {bin_type['color']} bins tonight. Thank you!")
-            print(f"Simulated test reminder: {message}")
-            return render_template_string(TEST_TEMPLATE, message=message)
-        else:
+        if not person or not bin_type:
             return "Cannot send test reminders. Please make sure you have added residents on the setup page."
+
+        # build simulated reminder message
+        if day_param == 'thursday':
+            message = (
+                f"Hello {person.name}! It's your turn to take out the bins. "
+                f"Tomorrow is {bin_type['type']} collection day. "
+                f"Please put the {bin_type['color']} bins out tonight. Thanks!"
+            )
+        elif day_param == 'friday':
+            message = (
+                f"Hey {person.name}, hope your day is going well! "
+                f"Just a friendly reminder to please bring in the {bin_type['color']} bins tonight. Thank you!"
+            )
+
+        # log to console for debugging
+        print(f"Simulated test reminder: {message}")
+
+        return render_template_string(TEST_TEMPLATE, message=message)
 
 # --- Initial app setup and start scheduler ---
 if __name__ == '__main__':
